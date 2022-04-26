@@ -1,2 +1,1 @@
-# nodersa
-NodeRSA - Simple javascript based CA utility
+# NodeRSA - Simple javascript based CA utility
