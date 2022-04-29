@@ -1,5 +1,6 @@
 const x509 = require('@peculiar/x509');
 const { Crypto } = require('@peculiar/webcrypto');
+const randomHex = require('@ayanamitech/randomhex');
 const fs = require('fs');
 const path = require('path');
 const { generateAlgo } = require('./algo');
@@ -65,7 +66,7 @@ const loadKeys = async ({thisKeys, dir, algo, privateKey, fileName, crypto, crea
   if (privateKey && checkPem(privateKey)) {
     return await pemToKey({private: privateKey, algo, crypto});
   }
-  if (!isBrowser && fileName && fs.existsSync(path.join(dir, fileName)) && checkPem(fs.readFileSync(path.join(dir, fileName)))) {
+  if (!isBrowser && dir && fileName && fs.existsSync(path.join(dir, fileName)) && checkPem(fs.readFileSync(path.join(dir, fileName)))) {
     return await pemToKey({private: fs.readFileSync(path.join(dir, fileName)), algo, crypto});
   }
   if (create) {
@@ -81,7 +82,7 @@ const loadCert = ({thisCert, dir, certificate, fileName}) => {
   if (certificate && checkPem(certificate)) {
     return new x509.X509Certificate(certificate);
   }
-  if (!isBrowser && fileName && fs.existsSync(path.join(dir, fileName)) && checkPem(fs.readFileSync(path.join(dir, fileName)))) {
+  if (!isBrowser && dir && fileName && fs.existsSync(path.join(dir, fileName)) && checkPem(fs.readFileSync(path.join(dir, fileName)))) {
     return new x509.X509Certificate(fs.readFileSync(path.join(dir, fileName)));
   }
   throw new Error('Certificate not found');
@@ -94,10 +95,20 @@ const loadReq = ({thisReq, dir, certificateRequest, fileName}) => {
   if (certificateRequest && checkPem(certificateRequest)) {
     return new x509.Pkcs10CertificateRequest(certificateRequest);
   }
-  if (!isBrowser && fileName && fs.existsSync(path.join(dir, fileName)) && checkPem(fs.readFileSync(path.join(dir, fileName)))) {
+  if (!isBrowser && dir && fileName && fs.existsSync(path.join(dir, fileName)) && checkPem(fs.readFileSync(path.join(dir, fileName)))) {
     return new x509.Pkcs10CertificateRequest(fs.readFileSync(path.join(dir, fileName)));
   }
   throw new Error('Certificate Request not found');
+};
+
+const loadSerial = ({thisSerial, dir, serialNumber, serialNumberBytes, fileName}) => {
+  if ((thisSerial || serialNumber) && (typeof thisSerial === 'string' || typeof serialNumber === 'string') && (thisSerial !== '01' && serialNumber !== '01')) {
+    return (parseInt(thisSerial || serialNumber, 16) + 1).toString(16);
+  }
+  if (!isBrowser && dir && fileName && fs.existsSync(path.join(dir, fileName))) {
+    return (parseInt(fs.readFileSync(path.join(dir, fileName)).toString(), 16) + 1).toString(16);
+  }
+  return randomHex(serialNumberBytes || 16);
 };
 
 const wrapFileName = (fileName) => {
@@ -126,6 +137,7 @@ module.exports = {
   loadKeys,
   loadCert,
   loadReq,
+  loadSerial,
   wrapFileName,
   unwrapFileName,
   getAltNameFromReq

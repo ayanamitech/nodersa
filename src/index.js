@@ -7,12 +7,25 @@ const fs = require('fs');
 const path = require('path');
 const process = require('process');
 
-const { isBrowser, keysToPem, loadKeys, loadCert, loadReq, wrapFileName, getAltNameFromReq } = require('./utils');
+const { isBrowser, keysToPem, loadKeys, loadCert, loadReq, loadSerial, wrapFileName } = require('./utils');
 const { signAlgo } = require('./algo');
 const attrsWrapper = require('./attrs');
+const templates = require('./templates');
 
 class NodeRSA {
   constructor(options) {
+    /**
+      Template:
+
+      mdm: Could be used to generate certificates for mobile devices
+
+      https://developer.apple.com/documentation/devicemanagement/implementing_device_management/managing_certificates_for_mdm_servers_and_devices
+
+      ssl: Could be used to generate certificate for web servers
+
+      vpn: Could be used to generate EasyRSA like certificate for VPN certificate
+    **/
+    this.template = 'ssl';
     /**
       NodeRSA parameters based off EasyRSA
 
@@ -108,7 +121,7 @@ class NodeRSA {
     }
     throw ({code: 'EEXIST'});
   }
-  async buildCA({commonName = this.commonName, attributes, serialNumber = this.serial, serialNumberBytes = this.serialBytes, existingPrivateKey} = {}) {
+  async buildCA({template = this.template, commonName = this.commonName, attributes, serialNumber = this.serial, serialNumberBytes = this.serialBytes, existingPrivateKey} = {}) {
     const crypto = new Crypto();
     const date = moment();
     x509.cryptoProvider.set(crypto);
@@ -124,12 +137,7 @@ class NodeRSA {
       signingAlgorithm: signAlgo(this.algo),
       publicKey: keys.publicKey,
       signingKey: keys.privateKey,
-      extensions: [
-        await x509.SubjectKeyIdentifierExtension.create(keys.publicKey),
-        new x509.KeyUsagesExtension(x509.KeyUsageFlags.keyCertSign | x509.KeyUsageFlags.cRLSign, true),
-        new x509.BasicConstraintsExtension(true, undefined, true),
-        // TO-DO Add Certificate revocation list support (https://github.com/PeculiarVentures/x509/pull/20)
-      ]
+      extensions: await templates[template].buildCA({subjectKey: keys.publicKey, authorityKey: keys.publicKey}),
     });
     this.rootCert = cert;
     this.rootKeys = keys;
@@ -152,30 +160,19 @@ class NodeRSA {
       };
     }
   }
-  async genReq({commonName = this.commonClientName, domains = this.domains, ips = this.ips, attributes, existingRootCA, existingPrivateKey} = {}) {
+  async genReq({template = this.template, type = 'server', commonName = this.commonClientName, domains = this.domains, ips = this.ips, attributes, existingRootCA, existingPrivateKey} = {}) {
     const crypto = new Crypto();
     x509.cryptoProvider.set(crypto);
     // Keys for client
     const keys = await loadKeys({dir: this.dir, algo: this.algo, privateKey: existingPrivateKey, fileName: './private/' + wrapFileName(commonName) + '.key', crypto});
     // Keys, Cert from CA Certificate
     const rootCert = loadCert({thisCert: this.rootCert, dir: this.dir, certificate: existingRootCA, fileName: 'ca.crt'});
-    const rootPublicKey = await rootCert.publicKey.export();
+    const authorityKey = await rootCert.publicKey.export();
     const req = await x509.Pkcs10CertificateRequestGenerator.create({
       name: attrsWrapper(attributes ? { ...attributes, cn: commonName } : { ...this.attrs, cn: commonName }),
       keys,
       signingAlgorithm: signAlgo(this.algo),
-      extensions: [
-        new x509.KeyUsagesExtension(x509.KeyUsageFlags.digitalSignature | x509.KeyUsageFlags.keyEncipherment),
-        new x509.ExtendedKeyUsageExtension(['1.3.6.1.5.5.7.3.1', '1.3.6.1.5.5.7.3.2'], false),
-        new x509.BasicConstraintsExtension(true, undefined, false),
-        await x509.SubjectKeyIdentifierExtension.create(keys.publicKey),
-        await x509.AuthorityKeyIdentifierExtension.create(rootPublicKey),
-        new x509.SubjectAlternativeNameExtension({
-          dns: domains,
-          ip: ips,
-        }),
-        new x509.CertificatePolicyExtension(['2.23.140.1.2.1']),
-      ],
+      extensions: await templates[template].genReq((template === 'ssl') ? {subjectKey: keys.publicKey, authorityKey, domains, ips} : (template === 'vpn') ? {subjectKey: keys.publicKey, authorityKey, type} : {subjectKey: keys.publicKey, authorityKey}),
     });
     const index = this.reqs.indexOf(this.reqs.find(r => r.commonName === commonName));
     if (index !== -1) {
@@ -213,10 +210,29 @@ class NodeRSA {
       };
     }
   }
-  async signReq({commonName = 'Node-RSA Client', attributes, serialNumber, serialNumberBytes = this.serialBytes, certReq, existingRootCA, existingRootKeys} = {}) {
+  async signReq({template = this.template, type = 'server', commonName = 'Node-RSA Client', attributes, serialNumber, serialNumberBytes = this.serialBytes, certReq, existingRootCA, existingRootKeys} = {}) {
     const crypto = new Crypto();
     const date = moment();
     x509.cryptoProvider.set(crypto);
+    /**
+    TO-DO: Handle renewal with cert revoke list
+    Below code is working btw
+    const loadIssuedCert = () => {
+      try {
+        return loadCert({thisCert: this.reqs[this.reqs.indexOf(this.reqs.find(r => r.commonName === commonName))]?.cert, dir: this.dir, fileName: './issued/' + wrapFileName(commonName) + '.crt'});
+      } catch (err) {
+        return {};
+      }
+    };
+    const issuedCert = loadIssuedCert();
+    if (Object.keys(issuedCert).length > 0 && moment(issuedCert.notAfter).clone().subtract(30, 'days').utc().valueOf() > moment().utc().valueOf()) {
+      console.log('Certificate', commonName, 'not due <' +  moment(issuedCert.notAfter).clone().subtract(30, 'days').toDate() + '> for renewal');
+      return {
+        cert: issuedCert,
+        issued: false
+      };
+    }
+    **/
     const rootCert = loadCert({thisCert: this.rootCert, dir: this.dir, certificate: existingRootCA, fileName: 'ca.crt'});
     const rootKeys = await loadKeys({thisKeys: this.rootKeys, dir: this.dir, algo: this.algo, privateKey: existingRootKeys, fileName: './private/ca.key', crypto, create: false});
     const req = loadReq({thisReq: this.reqs[this.reqs.indexOf(this.reqs.find(r => r.commonName === commonName))]?.req, dir: this.dir, certificateRequest: certReq, fileName: './reqs/' + wrapFileName(commonName) + '.req'});
@@ -224,10 +240,11 @@ class NodeRSA {
     if (commonName !== certCommonName) {
       throw new Error('commonName mismatch with certReq');
     }
-    const serial = serialNumber || randomHex(serialNumberBytes);
+    const serial = loadSerial({thisSerial: this.serial, dir: this.dir, serialNumber, serialNumberBytes, fileName: 'serial'});
+    const certSerial = serial.length % 2 ? `0${serial}` : serial;
     const subjectKey = await req.publicKey.export();
     const cert = await x509.X509CertificateGenerator.create({
-      serialNumber: serial,
+      serialNumber: certSerial,
       subject: req.subject,
       issuer: rootCert.subject,
       notBefore: date.clone().toDate(),
@@ -235,15 +252,7 @@ class NodeRSA {
       signingAlgorithm: signAlgo(this.algo),
       publicKey: subjectKey,
       signingKey: rootKeys.privateKey,
-      extensions: [
-        new x509.KeyUsagesExtension(x509.KeyUsageFlags.digitalSignature | x509.KeyUsageFlags.keyEncipherment, true),
-        new x509.ExtendedKeyUsageExtension(['1.3.6.1.5.5.7.3.1', '1.3.6.1.5.5.7.3.2'], false),
-        new x509.BasicConstraintsExtension(true, undefined, true),
-        await x509.SubjectKeyIdentifierExtension.create(subjectKey),
-        await x509.AuthorityKeyIdentifierExtension.create(rootKeys.publicKey),
-        new x509.SubjectAlternativeNameExtension(getAltNameFromReq(req)),
-        new x509.CertificatePolicyExtension(['2.23.140.1.2.1']),
-      ]
+      extensions: await templates[template].signReq((template === 'ssl') ? {subjectKey, authorityKey: rootKeys.publicKey, req} : (template === 'vpn') ? {subjectKey, authorityKey: rootKeys.publicKey, type} : {subjectKey, authorityKey: rootKeys.publicKey}),
     });
     const index = this.reqs.indexOf(this.reqs.find(r => r.commonName === commonName));
     if (index !== -1) {
@@ -261,15 +270,20 @@ class NodeRSA {
         }
       });
     }
+    this.serial = certSerial;
     if (isBrowser) {
-      return cert;
+      return { cert };
     } else {
       if (!fs.existsSync(path.join(this.dir, 'issued'))) {
         fs.mkdirSync(path.join(this.dir, 'issued'), { recursive: true });
       }
+      // to-do complete index for openssl https://github.com/mgcrea/node-easyrsa/blob/master/src/index.js#L188
+      //const fileIndex = fs.existsSync(path.join(this.dir, 'index.txt')) ? fs.readFileSync(path.join(this.dir, 'index.txt')).toString() : '';
       const wrappedName = wrapFileName(commonName);
+      fs.writeFileSync(path.join(this.dir, 'certs_by_serial', `${certSerial}.pem`), cert.toString('pem'));
       fs.writeFileSync(path.join(this.dir, 'issued', `${wrappedName}.crt`), cert.toString('pem'));
-      return cert;
+      fs.writeFileSync(path.join(this.dir, 'serial'), certSerial);
+      return { cert };
     }
   }
 }
